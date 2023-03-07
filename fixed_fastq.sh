@@ -66,6 +66,8 @@ do
 done
 
 
+
+
 bash -c "$paste_cmd" | \
     awk -F "\t" -v filecount=$file_count -v gzip=$gzip -v output="$outfiles" '
     function InitArr(arr){
@@ -107,26 +109,13 @@ bash -c "$paste_cmd" | \
            for(i=1;i<=filecount;i++){
                 batch_arr[i] = ""
             }
-           batch_count = 100
+           batch_count = 100000 # write batch reads count
            read_count = 0
+           read_index = ""
 
     }
     
     {
-        # store info handle
-        if(NR % 4 == 1){
-                read_count = read_count + 1
-        }
-        if(NR % 4 == 1 && batch_count <= read_count){
-                WritedArr(batch_arr, farr, pipetools)
-                InitArr(batch_arr)
-                InitArr(read_arr)
-                read_count = 0
-        }
-        if(NR % 4 == 1 && batch_count > read_count){
-                AddSwap(batch_arr, read_arr, "\n")
-                InitArr(read_arr)  
-        }
         # current line/read handle
         if (NF != filecount){
                 ### terminate program at any line
@@ -134,12 +123,36 @@ bash -c "$paste_cmd" | \
                 exit
         }
 
+        if(NR % 4 == 1){
+                split($1, read_index_arr, " ")
+                read_index = read_index_arr[2]
+        }
         for(i=1;i<=NF;i++){
                 line_arr[i] = $i
         }
         AddSwap(read_arr, line_arr, "\n")
+
+
+        # store info handle
+        if(NR % 4 == 0){
+                read_count = read_count + 1
+        }
+        if(NR % 4 == 0 && batch_count > read_count){
+                AddSwap(batch_arr, read_arr, "\n")
+                InitArr(read_arr)  
+        }
+
+        if(NR % 4 == 0 && batch_count <= read_count){
+                AddSwap(batch_arr, read_arr, "\n")
+                WritedArr(batch_arr, farr, pipetools)
+                InitArr(batch_arr)
+                InitArr(read_arr)
+                read_count = 0
+        }
+        
    }
    
    END{
-        WritedArr(batch_arr, farr, pipetools)
+        WritedArr(batch_arr, farr, pipetools);
+        print read_index
    }'
