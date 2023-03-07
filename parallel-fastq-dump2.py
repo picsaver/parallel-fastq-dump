@@ -1,14 +1,14 @@
-#!/usr/bin/env python3
+#! /usr/bin/env python3
 import sys
 import os
 import re
 import glob
 import shutil
-import tempfile
 from multiprocessing.dummy import Pool as ThreadPool
 import subprocess
 import argparse
 import logging
+# import tempfile
 
 __version__ = '0.6.7'
 
@@ -17,9 +17,9 @@ class CustomFormatter(argparse.ArgumentDefaultsHelpFormatter,
                       argparse.RawDescriptionHelpFormatter):
     pass
 
-desc = 'parallel fastq-dump wrapper, extra args will be passed through'
+desc = 'parallel fastq-dump2 wrapper, extra args will be passed through'
 epi = """DESCRIPTION:
-Example: parallel-fastq-dump --sra-id SRR2244401 --threads 4 --outdir out/ --split-files --gzip
+Example: parallel-fastq-dump2.py --sra-id SRR2244401 --splitN 10 --threads 4 --outdir out/ --split-files --gzip
 """
 
 parser = argparse.ArgumentParser(description=desc, epilog=epi,
@@ -29,14 +29,13 @@ parser.add_argument('-s','--sra-id', help='SRA id', action='append')
 parser.add_argument('-t','--threads', help='number of threads', default=1, type=int)
 parser.add_argument('-P','--splitN', help='number of n_pieces', default=1, type=int)
 parser.add_argument('-O','--outdir', help='output directory', default='.')
-parser.add_argument('-T', '--tmpdir', help='temporary directory', default=None)
+parser.add_argument('-T', '--tmpdir', help='temporary directory', default='/tmp')
 parser.add_argument('-N','--minSpotId', help='Minimum spot id', default=1, type=int)
 parser.add_argument('-X','--maxSpotId', help='Maximum spot id', default=None, type=int)
 parser.add_argument('-V', '--version', help='shows version', action='store_true', default=False)
 
 global awk_script
 awk_script =  os.path.join(os.path.dirname(__file__), "fixed_fastq.sh")
-
 
 
     
@@ -55,7 +54,16 @@ def download_continued(start_SpotId, end_SpotId, srr_id, outdir_prefix = "./", e
         return(p.stdout.read().strip())
 
     if retry > 1:
+        # get last retry output EndSpot as this try StartSpot
         start_SpotId = packedLastOutput(srr_id, outdir_prefix, retry = retry -1)
+        if not start_SpotId:
+            logging.warning('{}/try {}:can not get end Spot for another try start Spot'.format(outdir_prefix, retry-1))
+            sys.exit(1)
+        else:
+            start_SpotId = int(start_SpotId) + 1
+        if start_SpotId > int(end_SpotId): # actualy finished
+            return retry
+        logging.info('{}/try {}: get end Spot for another try start Spot {}'.format(outdir_prefix, retry-1, start_SpotId))
 
     outdir = "%s-%02d" %(outdir_prefix, retry)
     if not os.path.exists(outdir): os.mkdir(outdir)
@@ -64,19 +72,29 @@ def download_continued(start_SpotId, end_SpotId, srr_id, outdir_prefix = "./", e
            '-O', outdir] + extra_args + [srr_id]
     logging.info('CMD: {}'.format(' '.join(cmd)))
     p = subprocess.Popen(cmd)
-    exit_code = p.poll()
-    # exit_code = p.wait()
+    # exit_code = p.poll()
+    exit_code = p.wait()
     if exit_code != 0:
-        logging.warning('try {}: fastq-dump error! exit code: {}'.format(retry, exit_code))
+        logging.warning('{}/try {}: fastq-dump error! exit code: {}'.format(outdir, retry, exit_code))
         return download_continued(start_SpotId = start_SpotId, 
                                  end_SpotId = end_SpotId, 
                                  srr_id = srr_id, 
                                  outdir_prefix = outdir_prefix, 
                                  extra_args = extra_args, 
                                  retry = retry + 1)
+        #sys.exit(1)
+    logging.info('finish {} => try {}'.format(outdir_prefix, retry ))
     return retry
 
-
+def download_continued_submit(dict_args):
+    return download_continued(
+        start_SpotId = dict_args['start_SpotId'], 
+        end_SpotId = dict_args['end_SpotId'],
+        srr_id = dict_args['srr_id'],
+        outdir_prefix = dict_args['outdir_prefix'] if 'outdir_prefix' in dict_args else "./",
+        extra_args = dict_args['extra_args'] if 'extra_args' in dict_args else [],
+        retry = dict_args['retry'] if 'retry' in dict_args else 1
+    )
     
 def split_blocks(start, end, n_pieces):
     total = (end-start+1)
@@ -152,8 +170,11 @@ def pfd(args, srr_id, extra_args):
     extra_args : dict
         Extra args
     """
-    tmp_dir = tempfile.TemporaryDirectory(prefix='pfd_',dir=args.tmpdir)
-    logging.info('tempdir: {}'.format(tmp_dir.name))
+    # tmp_dir = tempfile.TemporaryDirectory(prefix='pfd_',dir=args.tmpdir)
+    tmp_dir = os.path.join(args.tmpdir, "tmp_%s" %os.path.basename(srr_id))
+    if (not os.path.exists(tmp_dir)):
+        os.makedirs(tmp_dir)
+    logging.info('tempdir: {}'.format(tmp_dir))
 
     n_spots = get_spot_count(srr_id)
     logging.info('{} spots: {}'.format(srr_id,n_spots))
@@ -170,21 +191,29 @@ def pfd(args, srr_id, extra_args):
     Pools = ThreadPool(args.threads)
     download_args = []
     for i in range(0,args.splitN):
-        d = os.path.join(tmp_dir.name, "%02d" %i)
+        d = os.path.join(tmp_dir, "%02d" %i)
         # os.mkdir(d)
         # cmd = ['fastq-dump', '-N', str(blocks[i][0]), '-X', str(blocks[i][1]),
         #        '-O', d] + extra_args + [srr_id]
         # p = subprocess.Popen(cmd)
         # ps.append(p)
-        download_args.append((blocks[i][0], blocks[i][1], srr_id, d, extra_args, 1))
+        #start_SpotId, end_SpotId, srr_id, outdir_prefix = "./", extra_args = [], retry 
+        download_args.append({'start_SpotId':blocks[i][0], 
+                                'end_SpotId':blocks[i][1], 
+                                'srr_id':srr_id, 
+                                'outdir_prefix':d, 
+                                'extra_args':extra_args, 
+                                'retry':1}
+                            )
         logging.info('submit: {} {}-{}'.format(d,blocks[i][0], blocks[i][1]))
-    print(download_args[0])
-    reslut = Pools.map(download_continued, download_args)
+    # print(download_args[0])
+    reslut = Pools.map(download_continued_submit, download_args)
     Pools.close()
     Pools.join()
     logging.info('each split try count: \n\t{}'.format(
         "\n\t".join(map(lambda x: "split %02d try %s times" %(x[0], str(x[1])), zip(range(args.splitN), reslut))
     )))
+    
 
 def main():
     """
@@ -207,10 +236,9 @@ def main():
         if not os.path.isdir(args.outdir) and args.outdir != '.':
             os.makedirs(args.outdir)
         # temp directory
-        if (args.tmpdir is not None and
-            not os.path.isdir(args.tmpdir)
-            and args.tmpdir != '.'):
+        if (not os.path.exists(args.tmpdir)):
             os.makedirs(args.tmpdir)
+            
         # fastq dump
         for si in args.sra_id:
             pfd(args, si, extra_args)
